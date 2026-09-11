@@ -1,100 +1,86 @@
 from __future__ import annotations
 
-from uuid import uuid4
+from pathlib import Path
 
-from hivemem.core import (
-    EpisodicMemory,
-    MemoryConsolidator,
-    MemoryRouter,
-    SemanticMemory,
-    WorkingMemory,
-    calculate_retention_score,
-)
+from hivemem.consolidation import Consolidator
+from hivemem.episodic_memory import EpisodicMemory
+from hivemem.forgetting import ForgettingEngine
+from hivemem.memory_router import MemoryRouter
 from hivemem.models import Memory, MemoryQuery, MemoryResult, MemoryType
+from hivemem.semantic_memory import SemanticMemory
+from hivemem.working_memory import WorkingMemory
 
 
 class HiveMemory:
-    def __init__(
-        self,
-        db_path: str = "hivemem.db",
-        working_capacity: int = 20,
-    ):
-        self.working_memory = WorkingMemory(capacity=working_capacity)
-        self.episodic_memory = EpisodicMemory(db_path)
-        self.semantic_memory = SemanticMemory()
+    def __init__(self, db_path: str | Path = "hivemem.db"):
+        self.working_memory = WorkingMemory()
+        self.episodic_memory = EpisodicMemory()
+        self.semantic_memory = SemanticMemory(db_path)
         self.router = MemoryRouter(
             working_memory=self.working_memory,
             episodic_memory=self.episodic_memory,
             semantic_memory=self.semantic_memory,
         )
-        self.consolidator = MemoryConsolidator()
+        self.consolidator = Consolidator(
+            working_memory=self.working_memory,
+            episodic_memory=self.episodic_memory,
+            semantic_memory=self.semantic_memory,
+        )
+        self.forgetting = ForgettingEngine(
+            working_memory=self.working_memory,
+            episodic_memory=self.episodic_memory,
+            semantic_memory=self.semantic_memory,
+        )
 
     def remember(
         self,
         content: str,
-        memory_type: MemoryType = MemoryType.EPISODIC,
+        memory_type: MemoryType = MemoryType.WORKING,
         importance: float = 0.5,
-        confidence: float = 0.5,
-        source_session: str | None = None,
+        confidence: float = 1.0,
         tags: list[str] | None = None,
         metadata: dict | None = None,
     ) -> Memory:
         memory = Memory(
-            id=str(uuid4()),
             content=content,
             memory_type=memory_type,
             importance=importance,
             confidence=confidence,
-            source_session=source_session,
             tags=tags or [],
             metadata=metadata or {},
         )
-        return self.router.add(memory)
 
-    def recall(
-        self,
-        query: str,
-        limit: int = 5,
-        memory_types: list[MemoryType] | None = None,
-    ) -> list[MemoryResult]:
-        return self.router.recall(
+        if memory_type == MemoryType.WORKING:
+            return self.working_memory.add(memory)
+
+        if memory_type == MemoryType.EPISODIC:
+            return self.episodic_memory.add(memory)
+
+        return self.semantic_memory.add(memory)
+
+    def recall(self, query: str, limit: int = 10) -> list[MemoryResult]:
+        return self.router.search(
             MemoryQuery(
                 query=query,
                 limit=limit,
-                memory_types=memory_types,
             )
         )
 
     def consolidate(self) -> list[Memory]:
-        new_memories = self.consolidator.consolidate(
-            self.episodic_memory.all(),
-            self.semantic_memory.all(),
-        )
-
-        for memory in new_memories:
+        memories = self.consolidator.consolidate()
+        for memory in self.semantic_memory.all():
             self.semantic_memory.add(memory)
+        return memories
 
-        return new_memories
+    def forget(self, threshold: float = 0.2) -> int:
+        return self.forgetting.run(threshold=threshold)
 
-    def stats(self) -> dict:
+    def stats(self) -> dict[str, int]:
         return {
-            "working": len(self.working_memory),
-            "episodic": self.episodic_memory.count(),
-            "semantic": len(self.semantic_memory.all()),
+            "working": len(self.working_memory.all()),
+            "episodic": len(self.episodic_memory.all()),
+            "semantic": self.semantic_memory.count(),
         }
 
-    def retention_report(self) -> list[dict]:
-        memories = (
-            self.episodic_memory.all()
-            + self.semantic_memory.all()
-        )
-
-        return [
-            {
-                "id": memory.id,
-                "content": memory.content,
-                "type": memory.memory_type.value,
-                "retention_score": calculate_retention_score(memory),
-            }
-            for memory in memories
-        ]
+    def close(self) -> None:
+        self.semantic_memory.close()
