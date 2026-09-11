@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from hivemem.core.episodic_memory import EpisodicMemory
 from hivemem.core.semantic_memory import SemanticMemory
 from hivemem.core.working_memory import WorkingMemory
@@ -26,32 +28,47 @@ class MemoryRouter:
 
     def recall(self, request: MemoryQuery) -> list[MemoryResult]:
         memories: list[Memory] = []
-
         allowed_types = request.memory_types
 
         if not allowed_types or MemoryType.WORKING in allowed_types:
-            memories.extend(self.working_memory.get_recent(request.limit))
+            memories.extend(self.working_memory.all())
 
         if not allowed_types or MemoryType.EPISODIC in allowed_types:
-            memories.extend(self.episodic_memory.search(request.query, request.limit))
+            memories.extend(self.episodic_memory.all())
 
         if not allowed_types or MemoryType.SEMANTIC in allowed_types:
-            memories.extend(self.semantic_memory.search(request.query, request.limit))
+            memories.extend(self.semantic_memory.all())
 
-        query_words = set(request.query.lower().split())
-        results = []
+        query_words = {
+            word.strip(".,!?;:\"'()[]{}").lower()
+            for word in request.query.split()
+            if word.strip(".,!?;:\"'()[]{}")
+        }
 
+        results: list[MemoryResult] = []
         seen_ids: set[str] = set()
 
         for memory in memories:
             if memory.id in seen_ids:
                 continue
 
-            content_words = set(memory.content.lower().split())
+            seen_ids.add(memory.id)
+
+            content_words = {
+                word.strip(".,!?;:\"'()[]{}").lower()
+                for word in memory.content.split()
+                if word.strip(".,!?;:\"'()[]{}")
+            }
+
             overlap = len(query_words & content_words)
             score = overlap / max(len(query_words), 1)
 
             if score > 0:
+                memory.touch()
+
+                if memory.memory_type == MemoryType.EPISODIC:
+                    self.episodic_memory.add(memory)
+
                 results.append(
                     MemoryResult(
                         memory=memory,
@@ -59,7 +76,7 @@ class MemoryRouter:
                         source=memory.memory_type.value,
                     )
                 )
-                seen_ids.add(memory.id)
 
         results.sort(key=lambda result: result.score, reverse=True)
+
         return results[: request.limit]
