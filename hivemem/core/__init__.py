@@ -14,3 +14,4 @@ __all__ = [
     "calculate_retention_score",
     "should_archive",
 ]
+from hivemem.core.memory_lifecycle import MemoryLifecycle
