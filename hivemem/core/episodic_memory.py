@@ -1,115 +1,126 @@
-import sqlite3
-from datetime import datetime
+from __future__ import annotations
 
-from hivemem.models import Memory, MemoryStatus, MemoryType
+import json
+import sqlite3
+from pathlib import Path
+
+from hivemem.models import Memory, MemoryStatus
 
 
 class EpisodicMemory:
-    def __init__(self, database_path: str = "hivemem.db"):
-        self.database_path = database_path
-        self.connection = sqlite3.connect(self.database_path)
-        self.connection.row_factory = sqlite3.Row
-        self._create_tables()
+    def __init__(self, db_path: str = "hivemem.db"):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize()
 
-    def _create_tables(self) -> None:
-        self.connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS episodic_memories (
-                id TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                memory_type TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                last_accessed_at TEXT NOT NULL,
-                importance REAL NOT NULL,
-                confidence REAL NOT NULL,
-                access_count INTEGER NOT NULL,
-                source_session TEXT,
-                tags TEXT NOT NULL,
-                status TEXT NOT NULL,
-                metadata TEXT NOT NULL
+    def _connect(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _initialize(self):
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    memory_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    importance REAL NOT NULL,
+                    confidence REAL NOT NULL,
+                    access_count INTEGER NOT NULL,
+                    source_session TEXT,
+                    tags TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    metadata TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        self.connection.commit()
 
     def add(self, memory: Memory) -> Memory:
-        if memory.memory_type != MemoryType.EPISODIC:
-            memory.memory_type = MemoryType.EPISODIC
-
-        self.connection.execute(
-            """
-            INSERT OR REPLACE INTO episodic_memories (
-                id, content, memory_type, created_at, last_accessed_at,
-                importance, confidence, access_count, source_session,
-                tags, status, metadata
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO memories (
+                    id, content, memory_type, created_at, last_accessed_at,
+                    importance, confidence, access_count, source_session,
+                    tags, status, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory.id,
+                    memory.content,
+                    memory.memory_type.value,
+                    memory.created_at.isoformat(),
+                    memory.last_accessed_at.isoformat(),
+                    memory.importance,
+                    memory.confidence,
+                    memory.access_count,
+                    memory.source_session,
+                    json.dumps(memory.tags),
+                    memory.status.value,
+                    json.dumps(memory.metadata),
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                memory.id,
-                memory.content,
-                memory.memory_type.value,
-                memory.created_at.isoformat(),
-                memory.last_accessed_at.isoformat(),
-                memory.importance,
-                memory.confidence,
-                memory.access_count,
-                memory.source_session,
-                ",".join(memory.tags),
-                memory.status.value,
-                "{}",
-            ),
-        )
-        self.connection.commit()
         return memory
 
-    def get(self, memory_id: str) -> Memory | None:
-        row = self.connection.execute(
-            "SELECT * FROM episodic_memories WHERE id = ?",
-            (memory_id,),
-        ).fetchone()
-
-        if row is None:
-            return None
-
-        return self._row_to_memory(row)
-
     def all(self) -> list[Memory]:
-        rows = self.connection.execute(
-            "SELECT * FROM episodic_memories ORDER BY created_at ASC"
-        ).fetchall()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM memories
+                WHERE status = ?
+                ORDER BY created_at ASC
+                """,
+                (MemoryStatus.ACTIVE.value,),
+            ).fetchall()
 
         return [self._row_to_memory(row) for row in rows]
 
-    def search(self, text: str, limit: int = 10) -> list[Memory]:
-        rows = self.connection.execute(
-            """
-            SELECT * FROM episodic_memories
-            WHERE content LIKE ?
-            AND status = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (f"%{text}%", MemoryStatus.ACTIVE.value, limit),
-        ).fetchall()
+    def search(self, query: str, limit: int = 5) -> list[Memory]:
+        words = [word.lower() for word in query.split() if word.strip()]
+        memories = self.all()
 
-        return [self._row_to_memory(row) for row in rows]
+        scored = []
+        for memory in memories:
+            content = memory.content.lower()
+            score = sum(word in content for word in words)
+            if score > 0:
+                scored.append((score, memory))
 
-    def close(self) -> None:
-        self.connection.close()
+        scored.sort(key=lambda item: item[0], reverse=True)
+        results = []
 
-    @staticmethod
-    def _row_to_memory(row: sqlite3.Row) -> Memory:
+        for _, memory in scored[:limit]:
+            memory.touch()
+            self.add(memory)
+            results.append(memory)
+
+        return results
+
+    def count(self) -> int:
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM memories WHERE status = ?",
+                (MemoryStatus.ACTIVE.value,),
+            ).fetchone()[0]
+
+    def _row_to_memory(self, row: sqlite3.Row) -> Memory:
         return Memory(
             id=row["id"],
             content=row["content"],
-            memory_type=MemoryType(row["memory_type"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            last_accessed_at=datetime.fromisoformat(row["last_accessed_at"]),
+            memory_type=row["memory_type"],
+            created_at=row["created_at"],
+            last_accessed_at=row["last_accessed_at"],
             importance=row["importance"],
             confidence=row["confidence"],
             access_count=row["access_count"],
             source_session=row["source_session"],
-            tags=row["tags"].split(",") if row["tags"] else [],
-            status=MemoryStatus(row["status"]),
+            tags=json.loads(row["tags"] or "[]"),
+            status=row["status"],
+            metadata=json.loads(row["metadata"] or "{}"),
         )

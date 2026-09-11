@@ -1,3 +1,4 @@
+from hivemem.engine import HiveMemory
 from hivemem.models import (
     Memory,
     MemoryQuery,
@@ -6,9 +7,8 @@ from hivemem.models import (
     MemoryType,
 )
 
-__version__ = "0.1.0"
-
 __all__ = [
+    "HiveMemory",
     "Memory",
     "MemoryQuery",
     "MemoryResult",

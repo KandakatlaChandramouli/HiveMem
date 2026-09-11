@@ -1,29 +1,50 @@
-from hivemem.models import Memory, MemoryType
+from __future__ import annotations
+
+from hivemem.models import Memory, MemoryStatus
 
 
 class SemanticMemory:
     def __init__(self):
-        self._items: dict[str, Memory] = {}
+        self._memories: dict[str, Memory] = {}
 
     def add(self, memory: Memory) -> Memory:
-        memory.memory_type = MemoryType.SEMANTIC
-        self._items[memory.id] = memory
+        self._memories[memory.id] = memory
         return memory
 
-    def get(self, memory_id: str) -> Memory | None:
-        return self._items.get(memory_id)
-
     def all(self) -> list[Memory]:
-        return list(self._items.values())
-
-    def search(self, text: str, limit: int = 10) -> list[Memory]:
-        text_lower = text.lower()
-        matches = [
+        return [
             memory
-            for memory in self._items.values()
-            if text_lower in memory.content.lower()
+            for memory in self._memories.values()
+            if memory.status == MemoryStatus.ACTIVE
         ]
-        return matches[:limit]
 
-    def clear(self) -> None:
-        self._items.clear()
+    def search(self, query: str, limit: int = 5) -> list[Memory]:
+        words = {
+            word.strip(".,!?;:\"'()[]{}").lower()
+            for word in query.split()
+            if word.strip(".,!?;:\"'()[]{}")
+        }
+
+        scored = []
+
+        for memory in self.all():
+            content_words = {
+                word.strip(".,!?;:\"'()[]{}").lower()
+                for word in memory.content.split()
+                if word.strip(".,!?;:\"'()[]{}")
+            }
+
+            score = len(words & content_words)
+
+            if score > 0:
+                scored.append((score, memory))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        return [memory for _, memory in scored[:limit]]
+
+    def get(self, memory_id: str) -> Memory | None:
+        return self._memories.get(memory_id)
+
+    def count(self) -> int:
+        return len(self.all())
